@@ -1,8 +1,13 @@
 #include <iostream>
 #include <string>
 #include <stdexcept> // For std::runtime_error
-#include <algorithm> // For std::sort on arrays, std::min
+// #include <algorithm> // REMOVED: For std::sort on arrays, std::min
 #include <limits>    // For numeric_limits
+#include <fstream>   // NEW: For file operations (CSV)
+#include <sstream>   // NEW: For parsing CSV lines
+#include <cstdlib>   // NEW: For rand(), srand()
+#include <ctime>     // NEW: For time()
+
 // NO <vector>, <list> or other STL containers explicitly disallowed.
 
 using namespace std;
@@ -20,7 +25,7 @@ struct Player {
         return os;
     }
 
-    // Needed for sorting by MatchScheduler
+    // Needed for sorting by MatchScheduler (used by custom sort logic)
     bool operator<(const Player& other) const {
         return rank < other.rank;
     }
@@ -32,6 +37,23 @@ struct Player {
         return !(*this == other);
     }
 };
+
+// Custom Insertion Sort function for Player array (replaces std::sort)
+void insertionSortPlayers(Player arr[], int n) {
+    for (int i = 1; i < n; ++i) {
+        Player key = arr[i];
+        int j = i - 1;
+
+        // Move elements of arr[0..i-1], that are greater than key.rank,
+        // to one position ahead of their current position
+        while (j >= 0 && arr[j].rank > key.rank) { // Uses Player::rank for comparison
+            arr[j + 1] = arr[j];
+            j = j - 1;
+        }
+        arr[j + 1] = key;
+    }
+}
+
 
 // --- Match Struct (from Task 1) ---
 struct Match {
@@ -222,7 +244,7 @@ public:
         // are put into a temporary array, then pushed onto 'this' stack in reverse
         // order of how they were read from 'other'.
         Node* current = other.topNode;
-        T* tempArray = new T[other.count]; // Dynamic array for temporary storage
+        T* tempArray = new T[other.count]; // Dynamic array for temporary storage (C-style, not std::vector)
         int i = 0;
         while(current != nullptr) {
             tempArray[i++] = current->data; // tempArray[0] is top of 'other'
@@ -293,6 +315,9 @@ struct HistoricalMatch {
     }
 };
 
+// Global constant for maximum players, consistent across modules.
+const int MAX_PLAYERS_UNIVERSAL = 64; 
+
 // --- PlayerStats Struct (NEW for Task 4) ---
 // Tracks performance statistics for a single player.
 struct PlayerStats {
@@ -316,9 +341,6 @@ struct PlayerStats {
         return os;
     }
 };
-
-// Global constant for maximum players, consistent across modules.
-const int MAX_PLAYERS_UNIVERSAL = 64; 
 
 // --- GameResultLogger Class (NEW for Task 4) ---
 // Manages logging of match results and tracking player performance.
@@ -407,7 +429,13 @@ public:
 
     // Key Action: Store recent match results for quick review.
     void displayRecentMatches(int numToDisplay = 5) const {
-        cout << "\n--- Recent Match Results (Last " << min(numToDisplay, recentMatchesLog.size()) << " / " << recentMatchesLog.size() << " Total Recent) ---" << endl;
+        // Replaced std::min with explicit check
+        int actualDisplayCount = numToDisplay;
+        if (recentMatchesLog.size() < actualDisplayCount) {
+            actualDisplayCount = recentMatchesLog.size();
+        }
+        cout << "\n--- Recent Match Results (Last " << actualDisplayCount << " / " << recentMatchesLog.size() << " Total Recent) ---" << endl;
+        
         if (recentMatchesLog.isEmpty()) {
             cout << "No match results have been recorded yet." << endl;
         } else {
@@ -495,7 +523,7 @@ private:
 
     // Helper to sort players by rank (lower rank is better)
     void sortPlayersByRank(Player arr[], int n) {
-        sort(arr, arr + n); // Uses std::sort from <algorithm>
+        insertionSortPlayers(arr, n); // Uses custom insertionSortPlayers function
     }
 
 public:
@@ -505,7 +533,8 @@ public:
     // Adds a player to the tournament and initializes them for stats tracking.
     void addPlayer(const Player& player) {
         if (numInitialPlayers < MAX_PLAYERS_UNIVERSAL) {
-            // Prevent adding player with duplicate ID
+            // Prevent adding player with duplicate ID (if IDs are read from CSV)
+            // If IDs are generated sequentially, this check primarily catches external duplicates.
             for(int i=0; i < numInitialPlayers; ++i) {
                 if(initialPlayers[i].id == player.id) {
                     cerr << "Error: Player with ID " << player.id << " (" << initialPlayers[i].name 
@@ -596,9 +625,6 @@ public:
     void playAndProcessMatches() {
         // Check if there are any matches to play
         if (scheduledMatchesQueue.isEmpty()) {
-            // This is normal if, for example, only byes were processed in createNextRoundPairings
-            // or if the tournament is nearing its end.
-            // cout << "\nNo actual matches were scheduled in this phase." << endl; 
             return; // Nothing to play
         }
         
@@ -606,11 +632,10 @@ public:
         while (!scheduledMatchesQueue.isEmpty()) {
             Match currentMatch = scheduledMatchesQueue.dequeue();
 
-            // Simulate match outcome: player with lower rank number wins.
-            // If ranks are equal, player1 wins (arbitrary but consistent tie-break).
-            if (currentMatch.player1.rank <= currentMatch.player2.rank) {
+            // Simulate match outcome: RANDOMLY (50/50 chance for either player)
+            if (rand() % 2 == 0) { // If random number is even
                 currentMatch.winner = currentMatch.player1;
-            } else {
+            } else { // If random number is odd
                 currentMatch.winner = currentMatch.player2;
             }
             currentMatch.played = true;
@@ -627,11 +652,6 @@ public:
 
     // Advances winners from the winnersQueue to the waitingPlayersQueue for the next round.
     bool advanceToNextRound() {
-        // First, ensure any players left in waitingPlayersQueue (e.g. due to an interrupted process)
-        // are moved to winnersQueue if they were meant to advance (e.g. byes not yet moved).
-        // However, createNextRoundPairings should clear waitingPlayersQueue or handle byes directly to winnersQueue.
-        // This step ensures all "advancers" (winners of matches or byes) are in winnersQueue.
-
         if (winnersQueue.isEmpty() && waitingPlayersQueue.isEmpty()) {
              // No one won, no one is waiting. Tournament must be over or had no players.
             return false;
@@ -725,86 +745,101 @@ public:
 int main() {
     cout << "===== APU Esports Championship Management System =====" << endl;
 
+    // Seed random number generator ONCE at the start of the program
+    srand(static_cast<unsigned int>(time(0)));
+
     GameResultLogger gameLogger;          // Create Task 4 logger instance
     MatchScheduler scheduler(gameLogger); // Pass logger to Task 1 scheduler
 
-    int numPlayersInput; // Number of players user wants to register
-
-    // Get number of players to register
-    while (true) {
-        cout << "\nEnter the number of players to register (1-" << MAX_PLAYERS_UNIVERSAL << "): ";
-        cin >> numPlayersInput;
-        if (cin.fail() || numPlayersInput < 1 || numPlayersInput > MAX_PLAYERS_UNIVERSAL) {
-            cin.clear(); // Clear error flags
-            cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Discard invalid input
-            cout << "Invalid input. Please enter a number between 1 and " << MAX_PLAYERS_UNIVERSAL << "." << endl;
-        } else {
-            cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Discard the rest of the line
-            break;
-        }
+    // --- CSV File Input ---
+    cout << "\n--- Reading Player Data from player_ranks_full_names.csv ---" << endl;
+    ifstream inputFile("player_ranks_full_names.csv");
+    if (!inputFile.is_open()) {
+        cerr << "Error: Could not open player_ranks_full_names.csv. Please ensure the file exists in the same directory as the executable." << endl;
+        return 1; // Indicate error
     }
 
-    // Array to keep track of ranks used, to ensure uniqueness
+    string line;
+    // Skip header line "full name,player name,rank"
+    getline(inputFile, line); 
+
+    int nextPlayerId = 1; // Start generating unique IDs for players
+    
+    // To track used ranks for uniqueness check (re-added this)
     int usedRanks[MAX_PLAYERS_UNIVERSAL];
     int numUsedRanks = 0;
-    int nextPlayerId = 1; // Assign unique player IDs starting from 1
 
-    cout << "\n--- Player Registration ---" << endl;
-    for (int i = 0; i < numPlayersInput; ++i) {
-        string pName;
-        int pRank;
-        bool rankIsUnique;
-        int pId = nextPlayerId++; // Assign a new unique ID
+    int playersReadAttempted = 0; // Count players processed from CSV (including skipped)
 
-        cout << "\nEnter details for Player " << (i + 1) << " (System ID: " << pId << "):" << endl;
-        
-        // Get player name
-        cout << "Name: ";
-        getline(cin, pName); 
-        if (pName.empty()) { // Basic validation for name
-            cout << "Player name cannot be empty. Using default 'Player " << pId << "'." << endl;
-            pName = "Player " + to_string(pId);
-        }
+    while (getline(inputFile, line) && playersReadAttempted < MAX_PLAYERS_UNIVERSAL) {
+        stringstream ss(line);
+        string fullNameStr, playerNameStr, rankStr;
 
-        // Get player rank and ensure it's unique
-        do {
-            rankIsUnique = true;
-            cout << "Rank (integer, lower is better, must be unique): ";
-            cin >> pRank;
-            if (cin.fail()) {
-                cin.clear();
-                cin.ignore(numeric_limits<streamsize>::max(), '\n');
-                cout << "Invalid rank format. Please enter an integer." << endl;
-                rankIsUnique = false;
-                continue;
-            }
-            cin.ignore(numeric_limits<streamsize>::max(), '\n'); // Discard rest of the line
-            
-            // Check for rank uniqueness
-            for (int j = 0; j < numUsedRanks; ++j) {
-                if (usedRanks[j] == pRank) {
-                    cout << "Rank " << pRank << " is already taken by another player. Please enter a unique rank." << endl;
-                    rankIsUnique = false;
-                    break;
+        // Attempt to parse all three fields
+        if (getline(ss, fullNameStr, ',') && 
+            getline(ss, playerNameStr, ',') && 
+            getline(ss, rankStr)) 
+        {
+            playersReadAttempted++; // Increment even if player is skipped later
+
+            try {
+                int pRank = stoi(rankStr);
+                
+                // --- Input Validation & Uniqueness Checks ---
+                // Basic validation for parsed data
+                if (playerNameStr.empty()) {
+                     cerr << "Warning: Player name is empty in line: '" << line << "'. Using 'Unnamed Player'." << endl;
+                     playerNameStr = "Unnamed Player";
                 }
+                if (pRank < 0) {
+                    cerr << "Warning: Invalid Rank (Rank < 0) for player '" << playerNameStr << "' in line: '" << line << "'. Skipping." << endl;
+                    continue; // Skip this player
+                }
+                
+                // Check for rank uniqueness against already successfully added players
+                bool rankAlreadyUsed = false;
+                for (int j = 0; j < numUsedRanks; ++j) {
+                    if (usedRanks[j] == pRank) {
+                        cerr << "Warning: Rank " << pRank << " is duplicated for player '" << playerNameStr << "' in line: '" << line << "'. This player will be skipped." << endl;
+                        rankAlreadyUsed = true;
+                        break;
+                    }
+                }
+                if (rankAlreadyUsed) {
+                    continue; // Skip this player
+                }
+                
+                // If all checks pass, create Player object, add to scheduler, and mark rank as used
+                Player newPlayer(nextPlayerId++, playerNameStr, pRank); // Assign new sequential ID
+                scheduler.addPlayer(newPlayer); // This method also handles duplicate IDs for robustness
+                usedRanks[numUsedRanks++] = pRank;
+
+            } catch (const invalid_argument& e) {
+                cerr << "Warning: Invalid number format for Rank in line: '" << line << "' - " << e.what() << ". Skipping." << endl;
+            } catch (const out_of_range& e) {
+                cerr << "Warning: Number out of range for Rank in line: '" << line << "' - " << e.what() << ". Skipping." << endl;
             }
-        } while (!rankIsUnique);
-        usedRanks[numUsedRanks++] = pRank; // Add new rank to used list
-        
-        scheduler.addPlayer(Player(pId, pName, pRank)); // Add player to scheduler (and logger)
+        } else {
+            // Check if it's not just an empty line at the end of file
+            if (!line.empty()) {
+                 cerr << "Warning: Malformed line (expected 'full name,player name,rank'): '" << line << "'. Skipping." << endl;
+            }
+        }
     }
-    
+    inputFile.close();
+
     int actualRegisteredPlayers = scheduler.getNumInitialPlayers();
     if (actualRegisteredPlayers == 0) {
-        cout << "\nNo players were successfully registered. Exiting tournament." << endl;
+        cout << "\nNo players were successfully loaded from the CSV file. Please check 'player_ranks_full_names.csv' format and content, and ensure no duplicate ranks." << endl;
         return 0;
     }
+    cout << "Successfully loaded and registered " << actualRegisteredPlayers << " players from CSV." << endl;
     
-    scheduler.initializeTournament(); // Initialize with all successfully added players
+    // Initialize tournament with all successfully added players
+    scheduler.initializeTournament(); 
 
     if (actualRegisteredPlayers == 1) {
         cout << "\nOnly one player registered. This player is the champion by default." << endl;
-        // The tournament loop below will correctly identify this.
     }
 
     // --- Tournament Simulation Loop ---
@@ -815,25 +850,18 @@ int main() {
             break; // Tournament ends if only one player is left
         }
         cout << "\n<<<<< ROUND " << roundNum << " >>>>>" << endl;
-        // scheduler.displayWaitingPlayers(); // Optional: Display players waiting for this round
 
         if (!scheduler.createNextRoundPairings()) {
             // This implies not enough players were in waiting queue to form new matches.
             // isTournamentOver() should have caught the 1-player case.
-            // If 0 players, or some other issue, break.
-            if (scheduler.isTournamentOver()) break; // Double check
-            // cout << "Not enough players to create further pairings or tournament has concluded." << endl; // Verbose
+            if (scheduler.isTournamentOver()) break; 
             break;
         }
-        // scheduler.displayScheduledMatches(); // Optional: Display newly scheduled matches
         scheduler.playAndProcessMatches();   // Simulate matches, update winners
-        // scheduler.displayWinners();        // Optional: Display winners of this round
 
         if (!scheduler.advanceToNextRound()) {
             // If advanceToNextRound returns false, it often means the tournament is over 
-            // (e.g., only one winner was advanced, now sole player in waitingPlayersQueue).
-            if (scheduler.isTournamentOver()) break; // Final check after advancement attempt
-            // cout << "Advancement phase indicates no more rounds or an issue." << endl; // Verbose
+            if (scheduler.isTournamentOver()) break; 
             break; 
         }
         roundNum++;
@@ -856,9 +884,6 @@ int main() {
     }
     else {
         cout << "No single champion determined, or the tournament ended prematurely." << endl;
-        // Optional: Display final state of queues if needed for debugging
-        // scheduler.displayWaitingPlayers();
-        // scheduler.displayWinners();
     }
 
     // --- Task 4: Post-Tournament Reports Menu ---
